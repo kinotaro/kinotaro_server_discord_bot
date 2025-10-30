@@ -69,38 +69,19 @@ def get_proxmox_session():
     return session
 
 def get_node_status(session):
-    """全ノードの詳細ステータスを取得（単一/複数ノード両対応）"""
-    # ノード一覧
-    res = session.get(f"{PROXMOX_API}/nodes")
+    res = session.get(f"{PROXMOX_API}/nodes", timeout=10)
     res.raise_for_status()
-    nodes = res.json()["data"]
+    nodes = res.json().get("data", [])
 
     detailed = []
     for n in nodes:
-        name = n["node"]
-        try:
-            r = session.get(f"{PROXMOX_API}/nodes/{name}/status")
-            r.raise_for_status()
-            d = r.json()["data"]
-
-            mem_used = d.get("memory", {}).get("used", 0)
-            mem_total = d.get("memory", {}).get("total", 0)
-            detailed.append({
-                "node":   name,
-                "status": d.get("status", "unknown").upper(),
-                "cpu":    d.get("cpu", 0.0),          # 0.0〜1.0
-                "mem":    mem_used,                   # bytes
-                "maxmem": mem_total if mem_total else 1,  # 0割防止
-            })
-        except Exception as e:
-            # 失敗時も形は合わせる
-            detailed.append({
-                "node":   name,
-                "status": f"ERROR({e.__class__.__name__})",
-                "cpu":    0.0,
-                "mem":    0,
-                "maxmem": 1,
-            })
+        detailed.append({
+            "node": n["node"],
+            "status": n["status"].upper(),
+            "cpu": n["cpu"],
+            "mem": n["mem"],
+            "maxmem": n["maxmem"],
+        })
     return detailed
 
 def get_vm_status(session):
