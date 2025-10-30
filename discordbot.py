@@ -3,7 +3,7 @@ import requests
 import discord
 import asyncio
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from io import BytesIO
 import matplotlib.pyplot as plt
 
@@ -59,13 +59,10 @@ history_data = load_json(HISTORY_FILE, history_data)
 # ===============================================
 def get_proxmox_session():
     session = requests.Session()
-    session.headers.update({
-        "Authorization": f"PVEAPIToken={PROXMOX_TOKEN_ID}={PROXMOX_TOKEN_SECRET}"
-    })
-    # systemdで設定した REQUESTS_CA_BUNDLE を使う（なければ通常の検証）
-    verify_path = os.getenv("REQUESTS_CA_BUNDLE")
-    if verify_path:
-        session.verify = verify_path
+    session.headers.update({"Authorization": f"PVEAPIToken={PROXMOX_TOKEN_ID}={PROXMOX_TOKEN_SECRET}"})
+    vp = os.getenv("REQUESTS_CA_BUNDLE")
+    if vp:
+        session.verify = vp
     return session
 
 def get_node_status(session):
@@ -85,10 +82,14 @@ def get_node_status(session):
     return detailed
 
 def get_vm_status(session):
-    res = session.get(f"{PROXMOX_API}/cluster/resources", verify=True)
-    res.raise_for_status()
-    # VMだけ抽出
-    return [v for v in res.json()["data"] if v["type"] == "qemu"]
+    # VMのみ（LXC含めずQEMUのみ）
+    r = session.get(f"{PROXMOX_API}/cluster/resources?type=vm", timeout=10)
+    r.raise_for_status()
+    data = r.json().get("data", [])
+    # typeがqemuだけ拾う（LXCは除外）
+    vms = [v for v in data if v.get("type") == "qemu"]
+    # 返るフィールド例: status, cpu(0..1), maxmem, mem, vmid, name など
+    return vms
 
 # ===============================================
 # 表示用フォーマット
@@ -96,24 +97,25 @@ def get_vm_status(session):
 def format_summary(nodes, vms):
     summary = []
     for node in nodes:
-        status = node['status'].upper()
-        icon = "🟢" if status=="RUNNING" else "🔴" if status=="STOPPED" else "⚪"
+        status = node['status']
+        icon = "🟢" if status.startswith("ONLINE") else "🔴" if status.startswith("OFFLINE") else "⚪"
         summary.append(f"{node['node']}{icon}")
     for vm in vms:
-        status = vm['status'].upper()
-        icon = "🟢" if status=="RUNNING" else "🔴" if status=="STOPPED" else "⚪"
+        st = vm.get('status', 'unknown').upper()
+        icon = "🟢" if st=="RUNNING" else "🔴" if st=="STOPPED" else "⚪"
         summary.append(f"{vm['name']}{icon}")
     return " | ".join(summary)
 
 def format_detail(nodes, vms):
     lines = ["🖥 **ノード詳細**"]
     for node in nodes:
-        status = node['status']
-        icon = "🟢" if status.startswith("RUNNING") else "🔴" if status.startswith("STOPPED") else "⚪"
+        status = node['status']  # 例: ONLINE / ERROR など
+        # ONLINE を緑、それ以外は赤/白で
+        icon = "🟢" if status.startswith("ONLINE") else "🔴" if status.startswith("OFFLINE") else "⚪"
         cpu_pct = node['cpu'] * 100
         mem_pct = (node['mem'] / node['maxmem'] * 100) if node['maxmem'] else 0
         lines.append(f"- {node['node']}: {status} {icon} (CPU: {cpu_pct:.1f}% / MEM: {mem_pct:.1f}%)")
-
+    ...
     lines.append("\n**VM詳細**")
     for vm in vms:
         status = vm['status'].upper()
@@ -172,7 +174,7 @@ async def monitor():
             # -------------------
             # 履歴保存
             # -------------------
-            timestamp = datetime.utcnow().isoformat()
+            timestamp = datetime.now(timezone.utc).isoformat()
             for node in nodes:
                 entry = {"time": timestamp, "cpu": node['cpu'], "mem": node['mem']/node['maxmem']}
                 history_data.setdefault(node['node'], []).append(entry)
