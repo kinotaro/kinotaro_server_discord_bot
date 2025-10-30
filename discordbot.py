@@ -64,9 +64,38 @@ def get_proxmox_session():
     return session
 
 def get_node_status(session):
+    """全ノードの詳細ステータスを取得"""
+    # ノード一覧
     res = session.get(f"{PROXMOX_API}/nodes", verify=True)
     res.raise_for_status()
-    return res.json()["data"]
+    nodes = res.json()["data"]
+
+    detailed_nodes = []
+    for node in nodes:
+        name = node["node"]
+        try:
+            # 各ノードの詳細ステータスを取得
+            r = session.get(f"{PROXMOX_API}/nodes/{name}/status", verify=True)
+            r.raise_for_status()
+            data = r.json()["data"]
+
+            detailed_nodes.append({
+                "node": name,
+                "status": data.get("status", "unknown").upper(),
+                "cpu": data.get("cpu", 0),
+                "mem": data["memory"]["used"] if "memory" in data else 0,
+                "maxmem": data["memory"]["total"] if "memory" in data else 1,
+            })
+        except Exception as e:
+            print(f"ノード {name} の情報取得失敗: {e}")
+            detailed_nodes.append({
+                "node": name,
+                "status": "ERROR",
+                "cpu": 0,
+                "mem": 0,
+                "maxmem": 1,
+            })
+    return detailed_nodes
 
 def get_vm_status(session):
     res = session.get(f"{PROXMOX_API}/cluster/resources", verify=True)
