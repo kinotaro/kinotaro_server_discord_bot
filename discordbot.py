@@ -59,43 +59,49 @@ history_data = load_json(HISTORY_FILE, history_data)
 # ===============================================
 def get_proxmox_session():
     session = requests.Session()
-    headers = {"Authorization": f"PVEAPIToken={PROXMOX_TOKEN_ID}={PROXMOX_TOKEN_SECRET}"}
-    session.headers.update(headers)
+    session.headers.update({
+        "Authorization": f"PVEAPIToken={PROXMOX_TOKEN_ID}={PROXMOX_TOKEN_SECRET}"
+    })
+    # systemdで設定した REQUESTS_CA_BUNDLE を使う（なければ通常の検証）
+    verify_path = os.getenv("REQUESTS_CA_BUNDLE")
+    if verify_path:
+        session.verify = verify_path
     return session
 
 def get_node_status(session):
-    """全ノードの詳細ステータスを取得"""
+    """全ノードの詳細ステータスを取得（単一/複数ノード両対応）"""
     # ノード一覧
-    res = session.get(f"{PROXMOX_API}/nodes", verify=True)
+    res = session.get(f"{PROXMOX_API}/nodes")
     res.raise_for_status()
     nodes = res.json()["data"]
 
-    detailed_nodes = []
-    for node in nodes:
-        name = node["node"]
+    detailed = []
+    for n in nodes:
+        name = n["node"]
         try:
-            # 各ノードの詳細ステータスを取得
-            r = session.get(f"{PROXMOX_API}/nodes/{name}/status", verify=True)
+            r = session.get(f"{PROXMOX_API}/nodes/{name}/status")
             r.raise_for_status()
-            data = r.json()["data"]
+            d = r.json()["data"]
 
-            detailed_nodes.append({
-                "node": name,
-                "status": data.get("status", "unknown").upper(),
-                "cpu": data.get("cpu", 0),
-                "mem": data["memory"]["used"] if "memory" in data else 0,
-                "maxmem": data["memory"]["total"] if "memory" in data else 1,
+            mem_used = d.get("memory", {}).get("used", 0)
+            mem_total = d.get("memory", {}).get("total", 0)
+            detailed.append({
+                "node":   name,
+                "status": d.get("status", "unknown").upper(),
+                "cpu":    d.get("cpu", 0.0),          # 0.0〜1.0
+                "mem":    mem_used,                   # bytes
+                "maxmem": mem_total if mem_total else 1,  # 0割防止
             })
         except Exception as e:
-            print(f"ノード {name} の情報取得失敗: {e}")
-            detailed_nodes.append({
-                "node": name,
-                "status": "ERROR",
-                "cpu": 0,
-                "mem": 0,
+            # 失敗時も形は合わせる
+            detailed.append({
+                "node":   name,
+                "status": f"ERROR({e.__class__.__name__})",
+                "cpu":    0.0,
+                "mem":    0,
                 "maxmem": 1,
             })
-    return detailed_nodes
+    return detailed
 
 def get_vm_status(session):
     res = session.get(f"{PROXMOX_API}/cluster/resources", verify=True)
@@ -121,14 +127,19 @@ def format_summary(nodes, vms):
 def format_detail(nodes, vms):
     lines = ["🖥 **ノード詳細**"]
     for node in nodes:
-        status = node['status'].upper()
-        icon = "🟢" if status=="RUNNING" else "🔴" if status=="STOPPED" else "⚪"
-        lines.append(f"- {node['node']}: {status} {icon} (CPU: {node['cpu']*100:.1f}% / MEM: {node['mem']/node['maxmem']*100:.1f}%)")
+        status = node['status']
+        icon = "🟢" if status.startswith("RUNNING") else "🔴" if status.startswith("STOPPED") else "⚪"
+        cpu_pct = node['cpu'] * 100
+        mem_pct = (node['mem'] / node['maxmem'] * 100) if node['maxmem'] else 0
+        lines.append(f"- {node['node']}: {status} {icon} (CPU: {cpu_pct:.1f}% / MEM: {mem_pct:.1f}%)")
+
     lines.append("\n**VM詳細**")
     for vm in vms:
         status = vm['status'].upper()
         icon = "🟢" if status=="RUNNING" else "🔴" if status=="STOPPED" else "⚪"
-        lines.append(f"- {vm['name']}({vm['vmid']}): {status} {icon} (CPU: {vm['cpu']*100:.1f}% / MEM: {vm['mem']/vm['maxmem']*100:.1f}%)")
+        cpu_pct = vm.get('cpu', 0) * 100
+        mem_pct = (vm.get('mem', 0) / vm.get('maxmem', 1) * 100) if vm.get('maxmem') else 0
+        lines.append(f"- {vm['name']}({vm['vmid']}): {status} {icon} (CPU: {cpu_pct:.1f}% / MEM: {mem_pct:.1f}%)")
     return "\n".join(lines)
 
 # ===============================================
